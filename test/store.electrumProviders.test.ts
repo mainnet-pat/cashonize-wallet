@@ -70,6 +70,12 @@ describe('the electrum providers of the selected servers', () => {
       made.push(provider)
       return Promise.resolve(provider as never)
     })
+    // a custom single server on a test network gets the plain provider
+    vi.mocked(createProvider).mockImplementation((_network, servers) => {
+      const provider = fakeProvider([servers ?? []].flat().join(','))
+      made.push(provider)
+      return Promise.resolve(provider as never)
+    })
     settings.electrumServer = { mainnet: 'a.example', chipnet: 'b.example', testnet4: 't4.example' }
     settings.electrumMode = { mainnet: 'single', chipnet: 'single', testnet4: 'single' }
   })
@@ -86,11 +92,11 @@ describe('the electrum providers of the selected servers', () => {
     expect(setGlobalProvider).toHaveBeenCalledWith('testnet', madeFor('wss://b.example:50004'))
     expect(setGlobalProvider).toHaveBeenCalledWith('testnet4', madeFor('wss://t4.example:50004'))
 
-    const madeAtStartup = vi.mocked(createFailoverProvider).mock.calls.length
+    const madeAtStartup = made.length
     const provider = madeFor('wss://a.example:50004')
     await store.setWallet(walletOn(provider) as never)
     await store.setWallet(walletOn(provider) as never)
-    expect(createFailoverProvider).toHaveBeenCalledTimes(madeAtStartup)
+    expect(made).toHaveLength(madeAtStartup)
   })
 
   it('replaces the provider on a server change, and disconnects the old one once the wallet is off it', async () => {
@@ -263,6 +269,39 @@ describe('the electrum providers of the selected servers', () => {
     await store.initializeWallet()
 
     expect(vi.mocked(displayAndLogError).mock.calls[0]?.[0]).toMatchObject({ message: expect.stringContaining('bch.loping.net') })
+  })
+
+  // a devnet or a private chain sits below the test network's checkpoint, which the failover refuses
+  it('talks to a custom single server on a test network without the failover', async () => {
+    const store = useStore()
+    await flush()
+    expect(createProvider).toHaveBeenCalledWith('testnet', ['wss://b.example:50004'], { connectTimeout: expect.any(Number) })
+    expect(vi.mocked(createFailoverProvider).mock.calls.map(([network]) => network)).not.toContain('testnet')
+    expect(store.electrumServerInUse.chipnet).toBe('b.example')
+  })
+
+  // its chain check refuses a server of another chain before the server learns any address
+  it('keeps the failover for a custom single server on mainnet, and for a curated one anywhere', async () => {
+    settings.electrumServer.chipnet = 'chipnet.imaginary.cash'
+    useStore()
+    await flush()
+    const failoverNetworks = vi.mocked(createFailoverProvider).mock.calls.map(([network]) => network)
+    expect(failoverNetworks).toContain('mainnet')
+    expect(failoverNetworks).toContain('testnet')
+    expect(vi.mocked(createProvider).mock.calls.map(([network]) => network)).toEqual(['testnet4'])
+  })
+
+  it('does not name a replaced custom server as the one in use', async () => {
+    let finishFirst!: (provider: FakeProvider) => void
+    vi.mocked(createProvider).mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve as never }))
+    const store = useStore()
+    await flush()
+    settings.electrumServer.chipnet = 'd.example'
+    await nextTick()
+    await flush()
+    finishFirst(fakeProvider('wss://b.example:50004'))
+    await flush()
+    expect(store.electrumServerInUse.chipnet).toBe('d.example')
   })
 
   it('makes a new provider on a mode change', async () => {

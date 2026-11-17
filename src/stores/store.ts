@@ -37,7 +37,7 @@ import {
   type WalletType
 } from "../interfaces/interfaces"
 import { electrumWssUrl, formatFiatAmount, formatNumber, gatewayUrl, getBalanceFromUtxos, loadWalletFromId, sameTokenList, STALE_TIP_SECONDS, staleTipHours, walletTypeFromWalletId } from "src/utils/utils"
-import { electrumServersOf, saveLastGoodElectrumServer } from "src/utils/wallet/electrumServers"
+import { curatedElectrumServers, electrumServersOf, saveLastGoodElectrumServer } from "src/utils/wallet/electrumServers"
 import { toTokenAddress } from "src/utils/addressValidation"
 import {
   fetchTokenMetadata as fetchTokenMetadataFromIndexer,
@@ -524,11 +524,23 @@ export const useStore = defineStore('store', () => {
     };
     // a test network's hashrate is too erratic for a gap between blocks to say anything about the server
     if (network === 'mainnet') options.staleTipSeconds = STALE_TIP_SECONDS;
-    const provider = createFailoverProvider(libraryNetwork(network), urls, options)
-      .then((made) => {
-        setGlobalProvider(libraryNetwork(network), made);
-        return made;
-      });
+    // A custom single server on a test network can be a devnet or a private chain below the
+    // network's checkpoint, which the failover transport refuses; the plain transport talks to the
+    // one server the user chose. Mainnet keeps the failover's chain check, which refuses a server of
+    // another chain before it learns any address.
+    const customTestServer = network !== 'mainnet' && mode === 'single'
+      && !curatedElectrumServers[network].includes(settingsStore.electrumServer[network]);
+    const provider = (customTestServer
+      ? createProvider(libraryNetwork(network), urls, { connectTimeout: ELECTRUM_CONNECT_TIMEOUT_MS }).then((made) => {
+          setGlobalProvider(libraryNetwork(network), made);
+          if (selectedProviders[network]?.provider === provider) electrumServerInUse[network] = servers[0]!;
+          return made;
+        })
+      : createFailoverProvider(libraryNetwork(network), urls, options).then((made) => {
+          setGlobalProvider(libraryNetwork(network), made);
+          return made;
+        })
+    );
     selectedProviders[network] = { choice, provider };
     delete electrumServerInUse[network];
     // one that cannot be made is not kept, so the next call tries again; its rejection reaches
