@@ -1,0 +1,54 @@
+name: Browser Extension Build
+
+# Builds the Chromium extension and attaches it to the run as a zip for anyone to try: unzip it,
+# turn on Developer mode in chrome://extensions and load the unzipped folder with "Load unpacked".
+# Pushes to a bex branch also replace the asset of the rolling bex-latest release, whose URL is
+# stable and downloadable without a GitHub login.
+on:
+  push:
+    # a branch with bex in its name builds on every push, to try before it has a pull request
+    branches: [main, '**bex**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # a pull request's own commit rather than its merge into main, so the zip is named
+          # after a commit a tester can find on the pull request
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6  # reads pnpm version from package.json "packageManager"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:bex  # also zips the unpacked extension into Packaged.cashonize-wallet.zip
+      - run: mv dist/bex-chrome/Packaged.cashonize-wallet.zip "cashonize-extension-$(git rev-parse --short HEAD).zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: cashonize-extension-*.zip
+          archive: false  # the zip itself, under its own name, rather than wrapped in another zip
+          if-no-files-found: error
+
+      # A stable link for testers: one release tag, one asset name, replaced on every bex push.
+      # The tag stays at the build that created it; GitHub keys the download URL by tag and asset.
+      - name: Publish the rolling bex-latest release
+        if: github.event_name != 'pull_request' && contains(github.ref_name, 'bex')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp cashonize-extension-*.zip cashonize-extension.zip
+          gh release view bex-latest >/dev/null 2>&1 || \
+            gh release create bex-latest --target "$GITHUB_SHA" --prerelease \
+              --title "BEX latest" \
+              --notes "Rolling build of the Cashonize browser extension from the latest push to a bex branch. cashonize-extension.zip is replaced on every such push."
+          gh release upload bex-latest cashonize-extension.zip --clobber
